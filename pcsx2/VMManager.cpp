@@ -21,6 +21,7 @@
 #include "ImGui/FullscreenUI.h"
 #include "ImGui/ImGuiOverlays.h"
 #include "Input/InputManager.h"
+#include "Instrumentation/RLBenchmark.h"
 #include "IopBios.h"
 #include "MTGS.h"
 #include "MTVU.h"
@@ -2938,6 +2939,9 @@ void VMManager::Internal::VSyncOnCPUThread()
 	Achievements::FrameUpdate();
 
 	PollDiscordPresence();
+
+	if (RLBenchmark::IsEnabled())
+		RLBenchmark::OnVSync();
 }
 
 void VMManager::Internal::PollInputOnCPUThread()

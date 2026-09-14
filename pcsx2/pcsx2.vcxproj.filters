@@ -1346,6 +1346,9 @@
     <ClCompile Include="Hotkeys.cpp">
       <Filter>Misc</Filter>
     </ClCompile>
+    <ClCompile Include="Instrumentation\RLBenchmark.cpp">
+      <Filter>Misc</Filter>
+    </ClCompile>
     <ClCompile Include="INISettingsInterface.cpp">
       <Filter>Misc</Filter>
     </ClCompile>
@@ -2269,6 +2272,9 @@
       <Filter>Misc</Filter>
     </ClInclude>
     <ClInclude Include="INISettingsInterface.h">
+      <Filter>Misc</Filter>
+    </ClInclude>
+    <ClInclude Include="Instrumentation\RLBenchmark.h">
       <Filter>Misc</Filter>
     </ClInclude>
     <ClInclude Include="LayeredSettingsInterface.h">

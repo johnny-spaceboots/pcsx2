@@ -29,6 +29,7 @@
 #include "pcsx2/ImGui/ImGuiManager.h"
 #include "pcsx2/ImGui/ImGuiOverlays.h"
 #include "pcsx2/Input/InputManager.h"
+#include "pcsx2/Instrumentation/RLBenchmark.h"
 #include "pcsx2/MTGS.h"
 #include "pcsx2/PerformanceMetrics.h"
 #include "pcsx2/SPU2/spu2.h"
@@ -2144,6 +2145,7 @@ void QtHost::PrintCommandLineHelp(const std::string_view progname)
 	std::fprintf(stderr, "  -slowboot: Force slow boot for provided filename.\n");
 	std::fprintf(stderr, "  -state <index>: Loads specified save state by index.\n");
 	std::fprintf(stderr, "  -statefile <filename>: Loads state from the specified filename.\n");
+	std::fprintf(stderr, "  -rl-benchmark <config.json>: Runs the configured reinforcement-learning instrumentation benchmark.\n");
 	std::fprintf(stderr, "  -fullscreen: Enters fullscreen mode immediately after starting.\n");
 	std::fprintf(stderr, "  -nofullscreen: Prevents fullscreen mode from triggering if enabled.\n");
 	std::fprintf(stderr, "  -bigpicture: Forces PCSX2 to use the Big Picture mode (useful for controller-only and couch play).\n");
@@ -2238,6 +2240,22 @@ bool QtHost::ParseCommandLineOptions(const QStringList& args, std::shared_ptr<VM
 			{
 				AutoBoot(autoboot)->save_state = (++it)->toStdString();
 				continue;
+			}
+			else if (CHECK_ARG_PARAM(QStringLiteral("-rl-benchmark")))
+			{
+				const std::string config_path = (++it)->toStdString();
+				Error error;
+				if (!RLBenchmark::Initialize(config_path, &error))
+				{
+					std::fprintf(stderr, "Failed to initialize RL benchmark: %s\n", error.GetDescription().c_str());
+					return false;
+				}
+				continue;
+			}
+			else if (CHECK_ARG(QStringLiteral("-rl-benchmark")))
+			{
+				std::fprintf(stderr, "Missing config path after -rl-benchmark.\n");
+				return false;
 			}
 			else if (CHECK_ARG_PARAM(QStringLiteral("-elf")))
 			{
