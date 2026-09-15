@@ -83,6 +83,7 @@ set(pcsx2Sources
 	GSDumpReplayer.cpp
 	Host.cpp
 	Hotkeys.cpp
+	Instrumentation/RLBenchmark.cpp
 	Hw.cpp
 	HwRead.cpp
 	HwWrite.cpp
@@ -170,6 +171,7 @@ set(pcsx2Headers
 	Host.h
 	Hw.h
 	INISettingsInterface.h
+	Instrumentation/RLBenchmark.h
 	IopBios.h
 	IopCounters.h
 	IopDma.h
@@ -1154,6 +1156,7 @@ target_link_libraries(PCSX2_FLAGS INTERFACE
 	cpuinfo
 	cubeb
 	rcheevos
+	rapidjson
 	discord-rpc
 	simpleini
 	freesurround
