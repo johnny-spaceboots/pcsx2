@@ -14,7 +14,7 @@ The configuration schema remains version 1. Raw-mode result output uses result s
 
 Use one immutable set of inputs for every run in a baseline series:
 
-- Game: Melty Blood: Actress Again, serial `SLPM-55184`. The validated Phase 1 run reported current executable CRC `E97030DF`; do not mix results reporting a different serial or executable CRC into the same baseline.
+- Game: Melty Blood: Actress Again, serial `SLPM-55184`. The accepted Phase 2 reference series reports current executable CRC `E97030DF` and disc version `1.02`; do not mix results reporting a different serial, executable CRC, or disc version into the same baseline.
 - Disc image: use the same image for every run. Record its SHA-256 before the first reference run. On Windows, `Get-FileHash <disc-image> -Algorithm SHA256` provides the value.
 - PCSX2 build: use the same commit for all runs in a series. The result records both `pcsx2_build` and `pcsx2_commit`.
 - PCSX2 configuration: use one fixed configuration/data directory for the entire series. Do not change renderer, speedhacks, game-specific overrides, internal resolution, upscale factor, or thread-pinning settings between runs.
@@ -27,8 +27,9 @@ Recommended baseline record:
 | --- | --- |
 | Disc serial | `SLPM-55184` |
 | Executable CRC | `E97030DF` |
-| Disc SHA-256 | record before reference run |
-| Savestate SHA-256 | record before reference run |
+| Disc version | `1.02` |
+| Disc SHA-256 | record alongside canonical input archive |
+| Savestate SHA-256 | record alongside canonical input archive |
 | P1 character / Moon | record with canonical savestate |
 | P2 character / Moon | record with canonical savestate |
 | Stage | record with canonical savestate |
@@ -81,7 +82,52 @@ The process must return to the shell without user interaction. A successful resu
 
 The aggregate emulated FPS is calculated from the benchmark's own measured VSync count divided by monotonic wall-clock time. UI performance/FPS metrics are not used as the benchmark timer.
 
-## Three-run reference series
+## Accepted HX90 reference series
+
+The first accepted Phase 2 series was run on an AMD Ryzen 9 5900HX host using PCSX2 commit `9d9f0ca9343365a3392d04b970e8ff0d1c85a5ca`. All three results reported identical comparison metadata:
+
+| Field | Value |
+| --- | --- |
+| Game serial | `SLPM-55184` |
+| Executable CRC | `E97030DF` |
+| Disc version | `1.02` |
+| Renderer | Direct3D 12 |
+| Internal resolution | 640x448 |
+| Upscale multiplier | 1.0x |
+| MTVU | enabled |
+| Synchronous MTGS | disabled |
+| VSync queue size | 2 |
+| EE cycle rate / skip | 0 / 0 |
+| VU flag hack | enabled |
+| Instant VU1 | enabled |
+| Wait-loop detection | enabled |
+| Fast CDVD | disabled |
+| Thread pinning | disabled |
+| Limiter | unlimited |
+| Host CPU | AMD Ryzen 9 5900HX |
+| Host logical processors / cores / packages | 16 / 8 / 1 |
+| Observation count / bytes | 0 / 0 |
+| Synthetic input updates | 0 |
+
+Each run completed the 600-frame warmup followed by exactly 36,000 measured VSyncs and returned `success: true`.
+
+| Run | Wall seconds | Emulated FPS |
+| --- | ---: | ---: |
+| 1 | 37.2704623 | 965.912355 |
+| 2 | 36.5304296 | 985.479788 |
+| 3 | 36.8282403 | 977.510728 |
+| Mean | 36.8763774 | 976.300957 |
+| Min / max FPS | — | 965.912355 / 985.479788 |
+| FPS range | — | 19.567433 |
+| Spread `(max - min) / mean` | — | 2.004242% |
+| Sample standard deviation | — | 9.839653 FPS |
+| Coefficient of variation | — | 1.007850% |
+
+The approximately 2.00% max-to-min spread and 1.01% coefficient of variation are sufficiently tight to establish a useful raw-throughput baseline on this host. Preserve all three values when comparing later observation, control, or training-loop instrumentation; do not select only the fastest run.
+
+The JSON result schema does not contain disc-image or savestate hashes, character/Moon selections, stage, positions, health, or meter. Those canonical-input details should be stored alongside the reference input files rather than inferred from throughput results.
+
+## Repeating the reference series
 
 Perform three back-to-back runs on an otherwise idle machine with identical disc, savestate, PCSX2 build, PCSX2 settings, and workload. Use distinct output files, for example:
 
@@ -91,17 +137,6 @@ mbaa-raw-run-02.json
 mbaa-raw-run-03.json
 ```
 
-Before comparing throughput, verify that the following fields match between all three results: `game_serial`, `game_crc`, `pcsx2_commit`, `renderer`, `internal_resolution_width`, `internal_resolution_height`, `upscale_multiplier`, `mtvu`, `synchronous_mtgs`, `vsync_queue_size`, `ee_cycle_rate`, `ee_cycle_skip`, `vu_flag_hack`, `vu1_instant`, `wait_loop`, `fast_cdvd`, `thread_pinning`, `limiter_mode`, and the host CPU/count fields.
+Before comparing throughput, verify that the following fields match between all three results: `game_serial`, `game_crc`, `disc_version`, `pcsx2_commit`, `renderer`, `internal_resolution_width`, `internal_resolution_height`, `upscale_multiplier`, `mtvu`, `synchronous_mtgs`, `vsync_queue_size`, `ee_cycle_rate`, `ee_cycle_skip`, `vu_flag_hack`, `vu1_instant`, `wait_loop`, `fast_cdvd`, `thread_pinning`, `limiter_mode`, and the host CPU/count fields.
 
-Report all three raw FPS values rather than only the fastest result. Record at least:
-
-| Run | Wall seconds | Emulated FPS |
-| --- | ---: | ---: |
-| 1 | pending local reference run | pending |
-| 2 | pending local reference run | pending |
-| 3 | pending local reference run | pending |
-| Mean | pending | pending |
-| Min / max | pending | pending |
-| Spread `(max - min) / mean` | pending | pending |
-
-Do not hide run-to-run variance. If the spread is unexpectedly large, repeat only after identifying and documenting the external cause (background load, thermal throttling, power-plan change, configuration mismatch, and so on). The first accepted HX90 reference series should replace the pending values above with the observed measurements before Issue #2 is considered fully accepted.
+Report all three raw FPS values rather than only the fastest result. Record mean, min/max, and spread. Do not hide run-to-run variance. If the spread is unexpectedly large, repeat only after identifying and documenting the external cause (background load, thermal throttling, power-plan change, configuration mismatch, and so on).
