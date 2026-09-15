@@ -195,11 +195,11 @@ Result schema version 3 adds or populates:
 
 `synthetic_input_updates` remains zero in both raw and observe modes. Observe-mode `emulated_fps` uses the same measured VSync/wall-clock timer as raw mode, so the cost of the configured memory reads and hashing is included in the reported throughput.
 
-## Observed Phase 3 determinism check
+## Accepted Phase 3 HX90 observation series
 
-Two consecutive fixed-savestate observe runs were completed on the AMD Ryzen 9 5900HX using PCSX2 commit `bd0b58f40ce8c6fd53d61ac1d75f0e0f644d8981`. Both runs used Direct3D 12 at 640x448, 1.0x upscale, MTVU enabled, unlimited limiter mode, a 600-frame warmup, 36,000 measured frames, and `decision_interval: 4`.
+Two consecutive fixed-savestate observe runs and one same-build raw comparison were completed on the AMD Ryzen 9 5900HX using PCSX2 commit `bd0b58f40ce8c6fd53d61ac1d75f0e0f644d8981`. All three throughput runs used Direct3D 12 at 640x448, 1.0x upscale, MTVU enabled, unlimited limiter mode, a 600-frame warmup, and exactly 36,000 measured frames.
 
-The configured ranges were:
+The observe runs used `decision_interval: 4` with these ranges, in this order:
 
 ```json
 [
@@ -208,38 +208,63 @@ The configured ranges were:
 ]
 ```
 
-Both runs produced exactly the expected metrics:
+Both observe runs produced exactly the expected metrics:
 
 - `observation_count: 9000` (`36000 / 4`)
 - `bytes_per_observation: 384`
 - `observation_bytes: 3456000`
 - `synthetic_input_updates: 0`
 - `trajectory_hash_algorithm: "fnv1a64"`
-- `trajectory_hash: "0288183957F28621"`
+- identical `trajectory_hash: "0288183957F28621"`
 - `success: true`
 
 | Run | Wall seconds | Emulated FPS | Trajectory hash |
 | --- | ---: | ---: | --- |
-| 1 | 37.1855109 | 968.119010 | `0288183957F28621` |
-| 2 | 37.4765087 | 960.601754 | `0288183957F28621` |
-| Mean | 37.3310098 | 964.360382 | identical |
-| FPS range | — | 7.517256 | — |
-| Spread `(max - min) / mean` | — | 0.779507% | — |
-| Sample standard deviation | — | 5.315503 FPS | — |
-| Coefficient of variation | — | 0.551195% | — |
+| Observe 1 | 37.1855109 | 968.119010 | `0288183957F28621` |
+| Observe 2 | 37.4765087 | 960.601754 | `0288183957F28621` |
+| Observe mean | 37.3310098 | 964.360382 | identical |
+| Same-build raw | 36.5470685 | 985.031125 | null |
 
-This validates deterministic range ordering, decision-boundary counting, byte accounting, and trajectory hashing for the tested fixed-savestate workload. It does not by itself complete Phase 3 acceptance: a same-build raw run is still required for the throughput delta/raw regression, and an invalid or unreadable range still needs to be exercised explicitly.
+The two observe runs had a 7.517256 FPS range, a 0.779507% max-to-min spread, a 5.315503 FPS sample standard deviation, and a 0.551195% coefficient of variation.
+
+Relative to the same-build raw result, the observed instrumentation delta is:
+
+```text
+100 * (964.360382 - 985.031125) / 985.031125 = -2.098486%
+```
+
+So this tested observation workload reduces throughput by approximately **2.10%** on the HX90. Individual observe-run deltas were -1.716912% and -2.480061% respectively.
+
+The same-build raw result confirms the Phase 3 implementation leaves raw mode observation-free: `observation_ranges` is empty, `observation_count`, `observation_bytes`, and `bytes_per_observation` are all zero, and both trajectory-hash fields are null.
+
+### Invalid-range failure check
+
+A separate short observe run used one syntactically valid but unreadable range:
+
+```json
+{"address": "0xDEADBEEF", "size": 256}
+```
+
+With a 60-frame warmup and `decision_interval: 4`, the benchmark reached the first observation boundary at measured frame 4 and terminated with `success: false`. The result reported zero completed observations/bytes and the explicit error:
+
+```text
+RL benchmark observe mode failed to read observation range 0 at EE address 0xDEADBEEF (256 bytes) on measured frame 4 (decision 0).
+```
+
+This confirms unreadable EE ranges fail at the requested decision boundary with the range index, address, size, measured frame, and decision index exposed in the result.
+
+Together, the accepted Phase 3 runs validate multiple discontiguous ranges in deterministic order, exact decision-interval sampling after warmup, byte/count accounting, repeated trajectory-hash determinism, explicit unreadable-range failure, and an unaffected raw mode.
 
 ## Phase 3 validation procedure
 
-Use the same disc, savestate, PCSX2 settings, renderer, limiter state, measured-frame count, and host conditions for raw and observe measurements. For an acceptance run:
+Use the same disc, savestate, PCSX2 settings, renderer, limiter state, measured-frame count, and host conditions for raw and observe measurements. For a new acceptance series:
 
-1. Run a raw benchmark on the Phase 3 commit to establish the directly comparable raw throughput for that build.
+1. Run a raw benchmark on the target commit to establish a directly comparable raw throughput for that build.
 2. Run the chosen observe configuration at least twice from the identical canonical savestate with no synthetic input.
 3. Verify that all observe runs report the same `observation_count`, `observation_bytes`, `bytes_per_observation`, observation range list, and final `trajectory_hash`.
 4. Verify the expected decision count `floor(frames / decision_interval)`.
 5. Test an invalid range/address and confirm the benchmark returns `success: false` with an explicit read/configuration error.
-6. Run raw mode again if needed to confirm it still reports zero observations/bytes and never populates a trajectory hash.
+6. Confirm raw mode still reports zero observations/bytes and never populates a trajectory hash.
 
 For a comparable raw FPS value `R` and observe FPS value `O`, report the observation throughput delta as:
 
