@@ -10,6 +10,11 @@
 #include "common/Error.h"
 #include "common/FileSystem.h"
 
+#ifdef _WIN32
+#include "common/RedtapeWindows.h"
+#include <io.h>
+#endif
+
 #include "fmt/format.h"
 #include "rapidjson/document.h"
 #include "rapidjson/error/en.h"
@@ -55,6 +60,38 @@ namespace RLBenchmark
 		std::uint64_t s_warmup_frames_seen = 0;
 		std::uint64_t s_measured_frames = 0;
 		Clock::time_point s_measurement_start;
+
+#ifdef _WIN32
+		bool HasValidCRTHandle(std::FILE* stream)
+		{
+			const int fd = _fileno(stream);
+			return fd >= 0 && _get_osfhandle(fd) != -1;
+		}
+
+		void EnsureBenchmarkStandardStreams()
+		{
+			const bool need_stdout = !HasValidCRTHandle(stdout);
+			const bool need_stderr = !HasValidCRTHandle(stderr);
+			if (!need_stdout && !need_stderr)
+				return;
+
+			// PCSX2 is a Windows-subsystem executable, so its CRT standard streams are not
+			// connected to the invoking terminal by default. Attach to the parent console
+			// for benchmark CLI output, while preserving any already-valid redirections.
+			if (GetConsoleCP() == 0 && !::AttachConsole(ATTACH_PARENT_PROCESS))
+				return;
+
+			std::FILE* reopened_stream = nullptr;
+			if (need_stdout)
+				freopen_s(&reopened_stream, "CONOUT$", "w", stdout);
+			if (need_stderr)
+				freopen_s(&reopened_stream, "CONOUT$", "w", stderr);
+		}
+#else
+		void EnsureBenchmarkStandardStreams()
+		{
+		}
+#endif
 
 		bool ReadRequiredString(
 			const rapidjson::Document& document, const char* name, std::string* value, Error* error)
@@ -179,6 +216,8 @@ namespace RLBenchmark
 
 	bool Initialize(const std::string& config_path, Error* error)
 	{
+		EnsureBenchmarkStandardStreams();
+
 		if (s_phase != Phase::Disabled)
 		{
 			Error::SetString(error, "RL benchmark has already been initialized.");
