@@ -4,6 +4,7 @@
 #include "Instrumentation/RLBenchmark.h"
 
 #include "BuildVersion.h"
+#include "GS/GS.h"
 #include "Host.h"
 #include "VMManager.h"
 
@@ -15,6 +16,7 @@
 #include <io.h>
 #endif
 
+#include "cpuinfo.h"
 #include "fmt/format.h"
 #include "rapidjson/document.h"
 #include "rapidjson/error/en.h"
@@ -33,7 +35,7 @@ namespace RLBenchmark
 	namespace
 	{
 		constexpr unsigned int CONFIG_SCHEMA_VERSION = 1;
-		constexpr unsigned int RESULT_SCHEMA_VERSION = 1;
+		constexpr unsigned int RESULT_SCHEMA_VERSION = 2;
 
 		struct Config
 		{
@@ -43,6 +45,29 @@ namespace RLBenchmark
 			std::uint64_t decision_interval = 0;
 			std::uint64_t input_seed = 0;
 			std::string output;
+		};
+
+		struct EnvironmentSnapshot
+		{
+			std::string renderer;
+			int internal_width = 0;
+			int internal_height = 0;
+			float upscale_multiplier = 0.0f;
+			bool mtvu = false;
+			bool synchronous_mtgs = false;
+			int vsync_queue_size = 0;
+			int ee_cycle_rate = 0;
+			unsigned int ee_cycle_skip = 0;
+			bool vu_flag_hack = false;
+			bool vu1_instant = false;
+			bool wait_loop = false;
+			bool fast_cdvd = false;
+			bool thread_pinning = false;
+			LimiterModeType limiter_mode = LimiterModeType::Nominal;
+			std::string host_cpu;
+			std::uint32_t host_logical_processors = 0;
+			std::uint32_t host_cores = 0;
+			std::uint32_t host_packages = 0;
 		};
 
 		enum class Phase
@@ -56,6 +81,7 @@ namespace RLBenchmark
 		using Clock = std::chrono::steady_clock;
 
 		Config s_config;
+		EnvironmentSnapshot s_environment;
 		Phase s_phase = Phase::Disabled;
 		std::uint64_t s_warmup_frames_seen = 0;
 		std::uint64_t s_measured_frames = 0;
@@ -150,6 +176,60 @@ namespace RLBenchmark
 			document.AddMember(rapidjson::StringRef(name), json_value, allocator);
 		}
 
+		const char* GetLimiterModeName(const LimiterModeType mode)
+		{
+			switch (mode)
+			{
+				case LimiterModeType::Nominal:
+					return "nominal";
+				case LimiterModeType::Turbo:
+					return "turbo";
+				case LimiterModeType::Slomo:
+					return "slomo";
+				case LimiterModeType::Unlimited:
+					return "unlimited";
+				default:
+					return "unknown";
+			}
+		}
+
+		void CaptureEnvironment()
+		{
+			s_environment = {};
+
+			const GSRendererType renderer = GSGetCurrentRenderer();
+			const char* renderer_name = Pcsx2Config::GSOptions::GetRendererName(renderer);
+			if (renderer_name)
+				s_environment.renderer = renderer_name;
+
+			GSgetInternalResolution(&s_environment.internal_width, &s_environment.internal_height);
+			s_environment.upscale_multiplier = EmuConfig.GS.UpscaleMultiplier;
+			s_environment.mtvu = EmuConfig.Speedhacks.vuThread;
+			s_environment.synchronous_mtgs = EmuConfig.GS.SynchronousMTGS;
+			s_environment.vsync_queue_size = EmuConfig.GS.VsyncQueueSize;
+			s_environment.ee_cycle_rate = EmuConfig.Speedhacks.EECycleRate;
+			s_environment.ee_cycle_skip = EmuConfig.Speedhacks.EECycleSkip;
+			s_environment.vu_flag_hack = EmuConfig.Speedhacks.vuFlagHack;
+			s_environment.vu1_instant = EmuConfig.Speedhacks.vu1Instant;
+			s_environment.wait_loop = EmuConfig.Speedhacks.WaitLoop;
+			s_environment.fast_cdvd = EmuConfig.Speedhacks.fastCDVD;
+			s_environment.thread_pinning = EmuConfig.EnableThreadPinning;
+			s_environment.limiter_mode = VMManager::GetLimiterMode();
+
+			if (cpuinfo_initialize())
+			{
+				s_environment.host_logical_processors = cpuinfo_get_processors_count();
+				s_environment.host_cores = cpuinfo_get_cores_count();
+				s_environment.host_packages = cpuinfo_get_packages_count();
+				if (s_environment.host_packages > 0)
+				{
+					const cpuinfo_package* package = cpuinfo_get_package(0);
+					if (package && package->name[0] != '\0')
+						s_environment.host_cpu = package->name;
+				}
+			}
+		}
+
 		std::string BuildResult(bool success, std::string_view error_text, double wall_seconds)
 		{
 			rapidjson::Document document(rapidjson::kObjectType);
@@ -178,8 +258,38 @@ namespace RLBenchmark
 			else
 				document.AddMember("game_crc", rapidjson::Value(rapidjson::kNullType), allocator);
 
+			const std::string disc_version = VMManager::GetDiscVersion();
+			AddNullableStringMember(document, "disc_version", disc_version.c_str());
 			AddNullableStringMember(document, "pcsx2_build", BuildVersion::GitRev);
 			AddNullableStringMember(document, "pcsx2_commit", BuildVersion::GitHash);
+
+			AddNullableStringMember(document, "renderer", s_environment.renderer.c_str());
+			document.AddMember("internal_resolution_width", s_environment.internal_width, allocator);
+			document.AddMember("internal_resolution_height", s_environment.internal_height, allocator);
+			document.AddMember("upscale_multiplier", s_environment.upscale_multiplier, allocator);
+			document.AddMember("mtvu", s_environment.mtvu, allocator);
+			document.AddMember("synchronous_mtgs", s_environment.synchronous_mtgs, allocator);
+			document.AddMember("vsync_queue_size", s_environment.vsync_queue_size, allocator);
+			document.AddMember("ee_cycle_rate", s_environment.ee_cycle_rate, allocator);
+			document.AddMember("ee_cycle_skip", s_environment.ee_cycle_skip, allocator);
+			document.AddMember("vu_flag_hack", s_environment.vu_flag_hack, allocator);
+			document.AddMember("vu1_instant", s_environment.vu1_instant, allocator);
+			document.AddMember("wait_loop", s_environment.wait_loop, allocator);
+			document.AddMember("fast_cdvd", s_environment.fast_cdvd, allocator);
+			document.AddMember("thread_pinning", s_environment.thread_pinning, allocator);
+			AddStringMember(document, "limiter_mode", GetLimiterModeName(s_environment.limiter_mode));
+			document.AddMember("unlimited", s_environment.limiter_mode == LimiterModeType::Unlimited, allocator);
+
+			AddNullableStringMember(document, "host_cpu", s_environment.host_cpu.c_str());
+			document.AddMember("host_logical_processors", s_environment.host_logical_processors, allocator);
+			document.AddMember("host_cores", s_environment.host_cores, allocator);
+			document.AddMember("host_packages", s_environment.host_packages, allocator);
+
+			// Raw mode deliberately has no benchmark observation or controller-update path.
+			document.AddMember("observation_count", 0u, allocator);
+			document.AddMember("observation_bytes", 0u, allocator);
+			document.AddMember("synthetic_input_updates", 0u, allocator);
+
 			document.AddMember("success", success, allocator);
 			AddStringMember(document, "error", error_text);
 
@@ -189,20 +299,22 @@ namespace RLBenchmark
 			return std::string(buffer.GetString(), buffer.GetSize());
 		}
 
-		void Finalize(const Clock::time_point end_time)
+		void Finalize(const Clock::time_point end_time, const bool success, std::string_view error_text)
 		{
 			s_phase = Phase::Finalized;
 
 			const double wall_seconds = std::chrono::duration<double>(end_time - s_measurement_start).count();
-			std::string result = BuildResult(true, {}, wall_seconds);
+			std::string result = BuildResult(success, error_text, wall_seconds);
 			std::string output_text = result;
 			output_text.push_back('\n');
 
 			if (!FileSystem::WriteStringToFile(s_config.output.c_str(), output_text))
 			{
-				const std::string error_text = fmt::format("Failed to write RL benchmark result to '{}'.", s_config.output);
-				result = BuildResult(false, error_text, wall_seconds);
-				std::fprintf(stderr, "%s\n", error_text.c_str());
+				std::string write_error = fmt::format("Failed to write RL benchmark result to '{}'.", s_config.output);
+				if (!error_text.empty())
+					write_error = fmt::format("{} {}", error_text, write_error);
+				result = BuildResult(false, write_error, wall_seconds);
+				std::fprintf(stderr, "%s\n", write_error.c_str());
 			}
 
 			std::fwrite(result.data(), 1, result.size(), stdout);
@@ -268,6 +380,11 @@ namespace RLBenchmark
 			return false;
 		}
 
+		if (config.mode != "raw")
+		{
+			Error::SetStringFmt(error, "Unsupported RL benchmark mode '{}'; expected 'raw'.", config.mode);
+			return false;
+		}
 		if (config.frames == 0)
 		{
 			Error::SetString(error, "RL benchmark config field 'frames' must be greater than zero.");
@@ -280,6 +397,7 @@ namespace RLBenchmark
 		}
 
 		s_config = std::move(config);
+		s_environment = {};
 		s_warmup_frames_seen = 0;
 		s_measured_frames = 0;
 		s_phase = Phase::Warmup;
@@ -302,7 +420,17 @@ namespace RLBenchmark
 					return;
 			}
 
+			CaptureEnvironment();
+			if (s_environment.limiter_mode != LimiterModeType::Unlimited)
+			{
+				s_measurement_start = Clock::now();
+				Finalize(s_measurement_start, false,
+					"RL benchmark raw mode requires unlimited speed; launch PCSX2 with -unlimited.");
+				return;
+			}
+
 			// A VSync boundary is the baseline for timing complete emulated frame intervals.
+			// Environment discovery above is intentionally outside the measured interval.
 			s_measurement_start = Clock::now();
 			s_phase = Phase::Measuring;
 			return;
@@ -313,6 +441,17 @@ namespace RLBenchmark
 
 		s_measured_frames++;
 		if (s_measured_frames == s_config.frames)
-			Finalize(Clock::now());
+		{
+			const Clock::time_point end_time = Clock::now();
+			if (VMManager::GetLimiterMode() != LimiterModeType::Unlimited)
+			{
+				Finalize(end_time, false,
+					"RL benchmark raw mode left unlimited speed before the measured run completed.");
+			}
+			else
+			{
+				Finalize(end_time, true, {});
+			}
+		}
 	}
 } // namespace RLBenchmark
