@@ -195,6 +195,41 @@ Result schema version 3 adds or populates:
 
 `synthetic_input_updates` remains zero in both raw and observe modes. Observe-mode `emulated_fps` uses the same measured VSync/wall-clock timer as raw mode, so the cost of the configured memory reads and hashing is included in the reported throughput.
 
+## Observed Phase 3 determinism check
+
+Two consecutive fixed-savestate observe runs were completed on the AMD Ryzen 9 5900HX using PCSX2 commit `bd0b58f40ce8c6fd53d61ac1d75f0e0f644d8981`. Both runs used Direct3D 12 at 640x448, 1.0x upscale, MTVU enabled, unlimited limiter mode, a 600-frame warmup, 36,000 measured frames, and `decision_interval: 4`.
+
+The configured ranges were:
+
+```json
+[
+  {"address": "0x00100000", "size": 256},
+  {"address": "0x00200000", "size": 128}
+]
+```
+
+Both runs produced exactly the expected metrics:
+
+- `observation_count: 9000` (`36000 / 4`)
+- `bytes_per_observation: 384`
+- `observation_bytes: 3456000`
+- `synthetic_input_updates: 0`
+- `trajectory_hash_algorithm: "fnv1a64"`
+- `trajectory_hash: "0288183957F28621"`
+- `success: true`
+
+| Run | Wall seconds | Emulated FPS | Trajectory hash |
+| --- | ---: | ---: | --- |
+| 1 | 37.1855109 | 968.119010 | `0288183957F28621` |
+| 2 | 37.4765087 | 960.601754 | `0288183957F28621` |
+| Mean | 37.3310098 | 964.360382 | identical |
+| FPS range | — | 7.517256 | — |
+| Spread `(max - min) / mean` | — | 0.779507% | — |
+| Sample standard deviation | — | 5.315503 FPS | — |
+| Coefficient of variation | — | 0.551195% | — |
+
+This validates deterministic range ordering, decision-boundary counting, byte accounting, and trajectory hashing for the tested fixed-savestate workload. It does not by itself complete Phase 3 acceptance: a same-build raw run is still required for the throughput delta/raw regression, and an invalid or unreadable range still needs to be exercised explicitly.
+
 ## Phase 3 validation procedure
 
 Use the same disc, savestate, PCSX2 settings, renderer, limiter state, measured-frame count, and host conditions for raw and observe measurements. For an acceptance run:
