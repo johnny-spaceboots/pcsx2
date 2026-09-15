@@ -4,6 +4,7 @@
 #include "Instrumentation/RLBenchmark.h"
 
 #include "BuildVersion.h"
+#include "DebugTools/DebugInterface.h"
 #include "GS/GS.h"
 #include "Host.h"
 #include "VMManager.h"
@@ -23,19 +24,30 @@
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
 
+#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace RLBenchmark
 {
 	namespace
 	{
 		constexpr unsigned int CONFIG_SCHEMA_VERSION = 1;
-		constexpr unsigned int RESULT_SCHEMA_VERSION = 2;
+		constexpr unsigned int RESULT_SCHEMA_VERSION = 3;
+		constexpr std::uint64_t TRAJECTORY_HASH_OFFSET_BASIS = 14695981039346656037ull;
+		constexpr std::uint64_t TRAJECTORY_HASH_PRIME = 1099511628211ull;
+
+		struct ObservationRange
+		{
+			u32 address = 0;
+			u32 size = 0;
+		};
 
 		struct Config
 		{
@@ -45,6 +57,9 @@ namespace RLBenchmark
 			std::uint64_t decision_interval = 0;
 			std::uint64_t input_seed = 0;
 			std::string output;
+			std::vector<ObservationRange> observation_ranges;
+			std::uint64_t observation_bytes_per_observation = 0;
+			u32 max_observation_range_size = 0;
 		};
 
 		struct EnvironmentSnapshot
@@ -85,6 +100,10 @@ namespace RLBenchmark
 		Phase s_phase = Phase::Disabled;
 		std::uint64_t s_warmup_frames_seen = 0;
 		std::uint64_t s_measured_frames = 0;
+		std::uint64_t s_observation_count = 0;
+		std::uint64_t s_observation_bytes = 0;
+		std::uint64_t s_trajectory_hash = TRAJECTORY_HASH_OFFSET_BASIS;
+		std::vector<u8> s_observation_buffer;
 		Clock::time_point s_measurement_start;
 
 #ifdef _WIN32
@@ -157,6 +176,98 @@ namespace RLBenchmark
 			return true;
 		}
 
+		bool ParseEEAddress(const std::string_view text, u32* address)
+		{
+			if (text.size() <= 2 || text[0] != '0' || (text[1] != 'x' && text[1] != 'X'))
+				return false;
+
+			std::uint64_t parsed = 0;
+			const char* const begin = text.data() + 2;
+			const char* const end = text.data() + text.size();
+			const auto result = std::from_chars(begin, end, parsed, 16);
+			if (result.ec != std::errc{} || result.ptr != end || parsed > std::numeric_limits<u32>::max())
+				return false;
+
+			*address = static_cast<u32>(parsed);
+			return true;
+		}
+
+		bool ParseObservationRanges(const rapidjson::Document& document, Config* config, Error* error)
+		{
+			const auto ranges_member = document.FindMember("observation_ranges");
+			if (ranges_member == document.MemberEnd())
+			{
+				Error::SetString(error, "RL benchmark observe mode requires 'observation_ranges'.");
+				return false;
+			}
+			if (!ranges_member->value.IsArray() || ranges_member->value.Empty())
+			{
+				Error::SetString(error, "RL benchmark config field 'observation_ranges' must be a non-empty array.");
+				return false;
+			}
+
+			std::uint64_t bytes_per_observation = 0;
+			for (rapidjson::SizeType i = 0; i < ranges_member->value.Size(); i++)
+			{
+				const rapidjson::Value& range_value = ranges_member->value[i];
+				if (!range_value.IsObject())
+				{
+					Error::SetStringFmt(error, "RL benchmark observation_ranges[{}] must be an object.", i);
+					return false;
+				}
+
+				const auto address_member = range_value.FindMember("address");
+				if (address_member == range_value.MemberEnd() || !address_member->value.IsString())
+				{
+					Error::SetStringFmt(error,
+						"RL benchmark observation_ranges[{}].address must be a hexadecimal string such as '0x00100000'.", i);
+					return false;
+				}
+
+				ObservationRange range;
+				const std::string_view address_text(
+					address_member->value.GetString(), address_member->value.GetStringLength());
+				if (!ParseEEAddress(address_text, &range.address))
+				{
+					Error::SetStringFmt(error,
+						"RL benchmark observation_ranges[{}].address '{}' is not a valid 32-bit EE virtual address.", i,
+						address_text);
+					return false;
+				}
+
+				const auto size_member = range_value.FindMember("size");
+				if (size_member == range_value.MemberEnd() || !size_member->value.IsUint() || size_member->value.GetUint() == 0)
+				{
+					Error::SetStringFmt(error,
+						"RL benchmark observation_ranges[{}].size must be an unsigned integer greater than zero.", i);
+					return false;
+				}
+				range.size = size_member->value.GetUint();
+
+				const std::uint64_t range_end = static_cast<std::uint64_t>(range.address) + range.size;
+				if (range_end > static_cast<std::uint64_t>(std::numeric_limits<u32>::max()) + 1ull)
+				{
+					Error::SetStringFmt(error,
+						"RL benchmark observation_ranges[{}] at 0x{:08X} with size {} crosses the 32-bit EE address space.",
+						i, range.address, range.size);
+					return false;
+				}
+
+				if (bytes_per_observation > std::numeric_limits<std::uint64_t>::max() - range.size)
+				{
+					Error::SetString(error, "RL benchmark observation_ranges total size overflows the result counter.");
+					return false;
+				}
+				bytes_per_observation += range.size;
+				if (range.size > config->max_observation_range_size)
+					config->max_observation_range_size = range.size;
+				config->observation_ranges.push_back(range);
+			}
+
+			config->observation_bytes_per_observation = bytes_per_observation;
+			return true;
+		}
+
 		void AddStringMember(rapidjson::Document& document, const char* name, std::string_view value)
 		{
 			auto& allocator = document.GetAllocator();
@@ -191,6 +302,24 @@ namespace RLBenchmark
 				default:
 					return "unknown";
 			}
+		}
+
+		void HashByte(std::uint64_t* hash, const u8 value)
+		{
+			*hash ^= value;
+			*hash *= TRAJECTORY_HASH_PRIME;
+		}
+
+		void HashUInt64(std::uint64_t* hash, const std::uint64_t value)
+		{
+			for (unsigned int i = 0; i < 8; i++)
+				HashByte(hash, static_cast<u8>((value >> (i * 8)) & 0xFFu));
+		}
+
+		void HashBytes(std::uint64_t* hash, const u8* bytes, const u32 size)
+		{
+			for (u32 i = 0; i < size; i++)
+				HashByte(hash, bytes[i]);
 		}
 
 		void CaptureEnvironment()
@@ -228,6 +357,35 @@ namespace RLBenchmark
 						s_environment.host_cpu = package->name;
 				}
 			}
+		}
+
+		bool CaptureObservation(const std::uint64_t measured_frame, std::string* error_text)
+		{
+			DebugInterface& ee = DebugInterface::get(BREAKPOINT_EE);
+			const std::uint64_t decision_index = s_observation_count;
+			std::uint64_t next_hash = s_trajectory_hash;
+			HashUInt64(&next_hash, measured_frame);
+			HashUInt64(&next_hash, decision_index);
+
+			for (std::size_t i = 0; i < s_config.observation_ranges.size(); i++)
+			{
+				const ObservationRange& range = s_config.observation_ranges[i];
+				if (!ee.ReadBytes(range.address, s_observation_buffer.data(), range.size))
+				{
+					*error_text = fmt::format(
+						"RL benchmark observe mode failed to read observation range {} at EE address 0x{:08X} ({} bytes) "
+						"on measured frame {} (decision {}).",
+						i, range.address, range.size, measured_frame, decision_index);
+					return false;
+				}
+
+				s_observation_bytes += range.size;
+				HashBytes(&next_hash, s_observation_buffer.data(), range.size);
+			}
+
+			s_trajectory_hash = next_hash;
+			s_observation_count++;
+			return true;
 		}
 
 		std::string BuildResult(bool success, std::string_view error_text, double wall_seconds)
@@ -285,10 +443,33 @@ namespace RLBenchmark
 			document.AddMember("host_cores", s_environment.host_cores, allocator);
 			document.AddMember("host_packages", s_environment.host_packages, allocator);
 
-			// Raw mode deliberately has no benchmark observation or controller-update path.
-			document.AddMember("observation_count", 0u, allocator);
-			document.AddMember("observation_bytes", 0u, allocator);
+			rapidjson::Value observation_ranges(rapidjson::kArrayType);
+			for (const ObservationRange& range : s_config.observation_ranges)
+			{
+				rapidjson::Value range_value(rapidjson::kObjectType);
+				const std::string address = fmt::format("0x{:08X}", range.address);
+				rapidjson::Value address_value;
+				address_value.SetString(address.data(), static_cast<rapidjson::SizeType>(address.size()), allocator);
+				range_value.AddMember("address", address_value, allocator);
+				range_value.AddMember("size", range.size, allocator);
+				observation_ranges.PushBack(range_value, allocator);
+			}
+			document.AddMember("observation_ranges", observation_ranges, allocator);
+			document.AddMember("observation_count", s_observation_count, allocator);
+			document.AddMember("observation_bytes", s_observation_bytes, allocator);
+			document.AddMember("bytes_per_observation", s_config.observation_bytes_per_observation, allocator);
 			document.AddMember("synthetic_input_updates", 0u, allocator);
+
+			if (s_config.mode == "observe")
+			{
+				AddStringMember(document, "trajectory_hash_algorithm", "fnv1a64");
+				AddStringMember(document, "trajectory_hash", fmt::format("{:016X}", s_trajectory_hash));
+			}
+			else
+			{
+				document.AddMember("trajectory_hash_algorithm", rapidjson::Value(rapidjson::kNullType), allocator);
+				document.AddMember("trajectory_hash", rapidjson::Value(rapidjson::kNullType), allocator);
+			}
 
 			document.AddMember("success", success, allocator);
 			AddStringMember(document, "error", error_text);
@@ -380,9 +561,9 @@ namespace RLBenchmark
 			return false;
 		}
 
-		if (config.mode != "raw")
+		if (config.mode != "raw" && config.mode != "observe")
 		{
-			Error::SetStringFmt(error, "Unsupported RL benchmark mode '{}'; expected 'raw'.", config.mode);
+			Error::SetStringFmt(error, "Unsupported RL benchmark mode '{}'; expected 'raw' or 'observe'.", config.mode);
 			return false;
 		}
 		if (config.frames == 0)
@@ -395,11 +576,19 @@ namespace RLBenchmark
 			Error::SetString(error, "RL benchmark config field 'decision_interval' must be greater than zero.");
 			return false;
 		}
+		if (config.mode == "observe" && !ParseObservationRanges(document, &config, error))
+			return false;
 
 		s_config = std::move(config);
 		s_environment = {};
 		s_warmup_frames_seen = 0;
 		s_measured_frames = 0;
+		s_observation_count = 0;
+		s_observation_bytes = 0;
+		s_trajectory_hash = TRAJECTORY_HASH_OFFSET_BASIS;
+		s_observation_buffer.clear();
+		if (s_config.max_observation_range_size > 0)
+			s_observation_buffer.resize(s_config.max_observation_range_size);
 		s_phase = Phase::Warmup;
 		return true;
 	}
@@ -425,7 +614,7 @@ namespace RLBenchmark
 			{
 				s_measurement_start = Clock::now();
 				Finalize(s_measurement_start, false,
-					"RL benchmark raw mode requires unlimited speed; launch PCSX2 with -unlimited.");
+					"RL benchmark requires unlimited speed; launch PCSX2 with -unlimited.");
 				return;
 			}
 
@@ -440,13 +629,23 @@ namespace RLBenchmark
 			return;
 
 		s_measured_frames++;
+		if (s_config.mode == "observe" && (s_measured_frames % s_config.decision_interval) == 0)
+		{
+			std::string observation_error;
+			if (!CaptureObservation(s_measured_frames, &observation_error))
+			{
+				Finalize(Clock::now(), false, observation_error);
+				return;
+			}
+		}
+
 		if (s_measured_frames == s_config.frames)
 		{
 			const Clock::time_point end_time = Clock::now();
 			if (VMManager::GetLimiterMode() != LimiterModeType::Unlimited)
 			{
 				Finalize(end_time, false,
-					"RL benchmark raw mode left unlimited speed before the measured run completed.");
+					"RL benchmark left unlimited speed before the measured run completed.");
 			}
 			else
 			{
